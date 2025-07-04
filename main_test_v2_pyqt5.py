@@ -102,6 +102,7 @@ class VideoPlayer(QWidget):
             self.statusLabel.setText(f"已選擇: {os.path.basename(file_path)}")
             self.video_path = file_path
             self.mediaPlayer.stop()
+            self.mediaPlayer.setVideoOutput(self.videoWidget)
             self.mediaPlayer.setMedia(QMediaContent(QUrl.fromLocalFile(file_path)))
             self.processButton.setEnabled(True)
             self.srt_path = os.path.splitext(file_path)[0] + "_combined.srt"
@@ -132,6 +133,7 @@ class VideoPlayer(QWidget):
         self.subtitleWidget.set_subtitles(self.subs, self.translated)
         self.statusLabel.setText("步驟 3/3: 準備播放器...")
         QApplication.processEvents()
+        self.mediaPlayer.setVideoOutput(self.videoWidget)
         self.mediaPlayer.setMedia(QMediaContent(QUrl.fromLocalFile(self.video_path)))
         self.mediaPlayer.play()
         self.mediaPlayer.pause()
