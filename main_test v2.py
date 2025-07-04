@@ -77,6 +77,12 @@ def select_video():
         btn_play_pause.config(state=tk.DISABLED)
         if cap: cap.release()
         cap = cv2.VideoCapture(video_path)
+        if os.path.exists(audio_path):
+            try:
+                os.remove(audio_path)
+                log(f"成功移除暫存音訊檔: {audio_path}")
+            except Exception as e:
+                log(f"刪除音訊檔失敗: {e}")
         if cap.isOpened():
             ret, frame = cap.read()
             if ret: show_frame(frame)
@@ -188,65 +194,72 @@ def replay():
     update_player()
 
 def seek(delta_ms):
+    global cap
     if not cap or not pygame.mixer.get_init(): return
-    duration_ms = cap.get(cv2.CAP_PROP_FRAME_COUNT) * (1000 / cap.get(cv2.CAP_PROP_FPS))
+    fps = cap.get(cv2.CAP_PROP_FPS)
+    frame_count = cap.get(cv2.CAP_PROP_FRAME_COUNT)
+    duration_ms = frame_count * (1000 / fps) if fps > 0 else 0
     current_time_ms = pygame.mixer.music.get_pos()
-    if current_time_ms == -1: current_time_ms = duration_ms
+    if current_time_ms == -1:
+        current_time_ms = duration_ms
     new_time_ms = current_time_ms + delta_ms
     new_time_ms = max(0, min(new_time_ms, duration_ms))
     pygame.mixer.music.play()
     pygame.mixer.music.set_pos(new_time_ms / 1000.0)
+    cap.set(cv2.CAP_PROP_POS_MSEC, new_time_ms)
     if not is_playing: pygame.mixer.music.pause()
     log(f"跳轉至: {new_time_ms/1000.0:.2f}s")
-    update_player()
+    update_player(force_time=new_time_ms)
 
 def set_position_from_scale(event):
+    global cap
     if cap and pygame.mixer.get_init():
         value = timeline_scale.get()
-        duration_ms = cap.get(cv2.CAP_PROP_FRAME_COUNT) * (1000 / cap.get(cv2.CAP_PROP_FPS))
+        fps = cap.get(cv2.CAP_PROP_FPS)
+        frame_count = cap.get(cv2.CAP_PROP_FRAME_COUNT)
+        duration_ms = frame_count * (1000 / fps) if fps > 0 else 0
         if duration_ms > 0:
             seek_time_ms = duration_ms * (float(value) / 100)
             pygame.mixer.music.play()
             pygame.mixer.music.set_pos(seek_time_ms / 1000.0)
+            cap.set(cv2.CAP_PROP_POS_MSEC, seek_time_ms)
             if not is_playing: pygame.mixer.music.pause()
-            update_player()
+            update_player(force_time=seek_time_ms)
 
-def update_player():
+def update_player(force_time=None):
     if not cap or not pygame.mixer.get_init(): return
 
-    now = pygame.mixer.music.get_pos()
-    
-    # 根據音訊時間設定影片影格
+    if force_time is not None:
+        now = force_time
+    else:
+        now = pygame.mixer.music.get_pos()
+    if now < 0:
+        now = 0
     cap.set(cv2.CAP_PROP_POS_MSEC, now)
     ret, frame = cap.read()
-    
     if ret:
         frame_rgb = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
         pil_img = Image.fromarray(frame_rgb)
         draw = ImageDraw.Draw(pil_img)
-
-        # 尋找並繪製字幕
         for sub in subtitles:
             if sub['start'] <= now <= sub['end']:
                 draw_subtitle_on_image(draw, sub['original'], sub['translated'], pil_img.size)
                 break
-        
         show_frame(cv2.cvtColor(np.array(pil_img), cv2.COLOR_RGB2BGR))
-        
-        # 更新進度條
-        duration_ms = cap.get(cv2.CAP_PROP_FRAME_COUNT) * (1000 / cap.get(cv2.CAP_PROP_FPS))
+        fps = cap.get(cv2.CAP_PROP_FPS)
+        frame_count = cap.get(cv2.CAP_PROP_FRAME_COUNT)
+        duration_ms = frame_count * (1000 / fps) if fps > 0 else 0
         if duration_ms > 0:
             timeline_scale.set(now / duration_ms * 100)
-
-    # 檢查是否繼續播放
     if pygame.mixer.music.get_busy():
-        root.after(30, update_player) # 30ms ~33fps
-    elif is_playing: # 播放結束
+        fps = cap.get(cv2.CAP_PROP_FPS)
+        delay = int(1000 / fps) if fps and fps > 0 else 30
+        root.after(delay, update_player)
+    elif is_playing:
         is_playing = False
         is_paused = False
         btn_play_pause.config(text="▶")
         log("播放結束")
-
 
 def draw_subtitle_on_image(draw, original, translated, frame_size):
     frame_w, frame_h = frame_size
@@ -349,3 +362,104 @@ if __name__ == "__main__":
 
     root.protocol("WM_DELETE_WINDOW", on_closing)
     root.mainloop()
+
+# === 新增：自動化測試可用的核心函式 ===
+def load_video_for_test(video_file_path):
+    '''自動化測試用：載入影片並初始化cap物件'''
+    global video_path, cap, is_playing, is_paused
+    video_path = video_file_path
+    is_playing = False
+    is_paused = False
+    if cap: cap.release()
+    cap = cv2.VideoCapture(video_path)
+    if os.path.exists(audio_path):
+        try:
+            os.remove(audio_path)
+            log(f"[TEST] 成功移除暫存音訊檔: {audio_path}")
+        except Exception as e:
+            log(f"[TEST] 刪除音訊檔失敗: {e}")
+    return cap.isOpened()
+
+def extract_audio_for_test():
+    '''自動化測試用：從當前video_path提取音訊到audio_path'''
+    if not video_path:
+        raise Exception("尚未載入影片")
+    # 釋放音訊播放資源，確保檔案可覆蓋
+    try:
+        if pygame.mixer.get_init():
+            pygame.mixer.music.stop()
+            pygame.mixer.quit()
+            time.sleep(0.1)
+    except Exception as e:
+        log(f"[TEST] 釋放音訊資源失敗: {e}")
+    if os.path.exists(audio_path):
+        try:
+            os.remove(audio_path)
+            log(f"[TEST] 成功移除暫存音訊檔: {audio_path}")
+        except Exception as e:
+            log(f"[TEST] 刪除音訊檔失敗: {e}")
+    with VideoFileClip(video_path) as video_clip:
+        video_clip.audio.write_audiofile(audio_path, logger=None)
+    return os.path.exists(audio_path)
+
+def test_seek_and_sync(seek_ms):
+    '''自動化測試用：快進/快退並同步音訊與影像'''
+    global cap
+    if not cap or not pygame.mixer.get_init():
+        raise Exception("尚未初始化影片或音訊")
+    fps = cap.get(cv2.CAP_PROP_FPS)
+    frame_count = cap.get(cv2.CAP_PROP_FRAME_COUNT)
+    duration_ms = frame_count * (1000 / fps) if fps > 0 else 0
+    pygame.mixer.music.load(audio_path)
+    # 追蹤累積 seek 位置
+    if not hasattr(test_seek_and_sync, 'accum_seek'):
+        test_seek_and_sync.accum_seek = 0
+    test_seek_and_sync.accum_seek += seek_ms
+    test_seek_and_sync.accum_seek = max(0, min(test_seek_and_sync.accum_seek, duration_ms))
+    pygame.mixer.music.play()
+    pygame.mixer.music.set_pos(test_seek_and_sync.accum_seek / 1000.0)
+    cap.set(cv2.CAP_PROP_POS_MSEC, test_seek_and_sync.accum_seek)
+    time.sleep(0.5)
+    pos = test_seek_and_sync.accum_seek
+    vpos = cap.get(cv2.CAP_PROP_POS_MSEC)
+    return pos, vpos
+
+def test_playback_smoothness(duration_sec=10):
+    '''自動化測試用：根據 FPS 精確計時取 frame，驗證流暢度。'''
+    import threading
+    global cap
+    try:
+        if pygame.mixer.get_init():
+            pygame.mixer.music.stop()
+            pygame.mixer.quit()
+            time.sleep(0.1)
+    except Exception as e:
+        log(f"[TEST] 釋放音訊資源失敗: {e}")
+    import pygame as _pg
+    _pg.mixer.init()
+    if not cap or not _pg.mixer.get_init():
+        raise Exception("尚未初始化影片或音訊")
+    fps = cap.get(cv2.CAP_PROP_FPS)
+    frame_count = cap.get(cv2.CAP_PROP_FRAME_COUNT)
+    duration_ms = frame_count * (1000 / fps) if fps > 0 else 0
+    _pg.mixer.music.load(audio_path)
+    _pg.mixer.music.play()
+    cap.set(cv2.CAP_PROP_POS_MSEC, 0)
+    frame_times = []
+    start = time.time()
+    frame_interval = 1.0 / fps
+    next_frame_time = start
+    while time.time() - start < duration_sec:
+        now = (time.time() - start) * 1000
+        cap.set(cv2.CAP_PROP_POS_MSEC, now)
+        ret, frame = cap.read()
+        if not ret:
+            break
+        frame_times.append(now)
+        next_frame_time += frame_interval
+        sleep_time = next_frame_time - time.time()
+        if sleep_time > 0:
+            time.sleep(sleep_time)
+    _pg.mixer.music.stop()
+    _pg.mixer.quit()
+    return len(frame_times), int(fps * duration_sec)
