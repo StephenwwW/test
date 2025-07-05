@@ -21,19 +21,20 @@ class SubtitleWidget(QLabel):
         self.setAlignment(Qt.AlignBottom | Qt.AlignLeft)
         self.setFont(QFont("Arial", 24))
         self.subs = []
-        self.translated = []
-    def set_subtitles(self, subs, translated):
+    def set_subtitles(self, subs, _):
         self.subs = subs
-        self.translated = translated
     def update_subtitle(self, ms):
+        # 只顯示一行字幕，且不重複呼叫 setText
         text = ""
-        for i, sub in enumerate(self.subs):
+        for sub in self.subs:
             start = sub[3] if len(sub) > 3 else 0
             end = sub[4] if len(sub) > 4 else 0
             if start <= ms <= end:
                 text = sub[0] if len(sub) > 0 else ''
                 break
-        self.setText(text)
+        # 僅當內容不同時才 setText，避免重複渲染
+        if self.text() != text:
+            self.setText(text)
 
 class VideoProcessThread(QThread):
     finished = pyqtSignal(list, list, str)
@@ -236,16 +237,15 @@ class VideoPlayer(QWidget):
             self.replayButton.setEnabled(False)
             self.rewindButton.setEnabled(False)
             self.forwardButton.setEnabled(False)
-            # 清空字幕顯示區域
+            # 清空字幕顯示區域與快取
             self.subtitleWidget.setText("")
             self.statusLabel.setText("")
-            # 停止 timer 並重設
             if self.timer.isActive():
                 self.timer.stop()
             self.timer = QTimer(self)
             self.timer.setInterval(30)
             self.timer.timeout.connect(self.update_ui)
-            # 嘗試自動載入對應字幕檔
+            # 只載入該影片對應字幕
             if os.path.exists(self.srt_path):
                 import pysrt
                 with open(self.srt_path, 'r', encoding='utf-8') as f:
@@ -346,25 +346,23 @@ class VideoPlayer(QWidget):
     def update_ui(self):
         pos = self.media_player.get_time()
         self.subtitleWidget.update_subtitle(pos)
-        # 狀態欄只顯示一組原文+翻譯，不重複
+        # 狀態欄顯示一行字幕（原文+翻譯，若有）
         gui_text = ""
-        for i, sub in enumerate(self.subs):
+        for sub in self.subs:
             start = sub[3] if len(sub) > 3 else 0
             end = sub[4] if len(sub) > 4 else 0
             if start <= pos <= end:
                 orig = sub[0] if len(sub) > 0 else ''
                 trans = sub[1] if len(sub) > 1 else ''
-                if orig and trans and orig.strip() == trans.strip():
-                    gui_text = orig
-                elif orig and trans:
+                if orig and trans and orig.strip() != trans.strip():
                     gui_text = orig + "\n" + trans
-                elif orig:
+                else:
                     gui_text = orig
-                elif trans:
-                    gui_text = trans
                 break
-        self.statusLabel.setFont(QFont("Arial", 24))
-        self.statusLabel.setText(gui_text if gui_text else "")
+        # 僅當內容不同時才 setText
+        if self.statusLabel.text() != gui_text:
+            self.statusLabel.setFont(QFont("Arial", 24))
+            self.statusLabel.setText(gui_text if gui_text else "")
         if self.media_player.get_length() > 0:
             self.progressSlider.setValue(int(pos / self.media_player.get_length() * 100))
         if not self.media_player.is_playing():
