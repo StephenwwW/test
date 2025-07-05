@@ -98,6 +98,8 @@ class VideoPlayer(QWidget):
         self.timer = QTimer(self)
         self.timer.setInterval(30)
         self.timer.timeout.connect(self.update_ui)
+        self.vlc_events = self.media_player.event_manager()
+        self.vlc_events.event_attach(vlc.EventType.MediaPlayerPlaying, self.on_vlc_playing)
         self.subs = []
         self.translated = []
         self.srt_path = None
@@ -108,6 +110,7 @@ class VideoPlayer(QWidget):
         self.model_path = config.get("model_path", "ggml-base.bin")
         self.setup_ui()
         self.connect_signals()
+        self.media_player.audio_set_volume(70)
     def setup_ui(self):
         vbox = QVBoxLayout()
         vbox.addWidget(self.videoWidget)
@@ -119,6 +122,12 @@ class VideoPlayer(QWidget):
         hbox.addWidget(self.rewindButton)
         hbox.addWidget(self.playButton)
         hbox.addWidget(self.forwardButton)
+        self.volumeSlider = QSlider(Qt.Horizontal)
+        self.volumeSlider.setRange(0, 100)
+        self.volumeSlider.setValue(70)
+        self.volumeSlider.setFixedWidth(120)
+        hbox.addWidget(QLabel("音量"))
+        hbox.addWidget(self.volumeSlider)
         vbox.addLayout(hbox)
         hbox2 = QHBoxLayout()
         hbox2.addWidget(self.selectButton)
@@ -138,6 +147,7 @@ class VideoPlayer(QWidget):
         self.forwardButton.clicked.connect(lambda: self.seek(5000))
         self.progressSlider.sliderReleased.connect(self.slider_seek)
         self.timer.timeout.connect(self.update_ui)
+        self.volumeSlider.valueChanged.connect(self.on_volume_changed)
     def select_video(self):
         file_path, _ = QFileDialog.getOpenFileName(self, "選擇影片", "", "MP4 files (*.mp4)")
         if file_path:
@@ -248,6 +258,11 @@ class VideoPlayer(QWidget):
                 return clip.fps
         except Exception:
             return 30
+    def on_vlc_playing(self, event):
+        if not self.timer.isActive():
+            self.timer.start()
+    def on_volume_changed(self, value):
+        self.media_player.audio_set_volume(value)
 
 def save_config(config_data):
     import json
