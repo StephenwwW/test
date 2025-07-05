@@ -108,6 +108,10 @@ class VideoPlayer(QWidget):
         config = load_config()
         self.whisper_path = config.get("whisper_path", "whisper.cpp.exe")
         self.model_path = config.get("model_path", "ggml-base.bin")
+        self.volumeSlider = QSlider(Qt.Horizontal)
+        self.volumeSlider.setRange(0, 100)
+        self.volumeSlider.setValue(70)
+        self.volumeSlider.setFixedWidth(120)
         self.setup_ui()
         self.connect_signals()
         self.media_player.audio_set_volume(70)
@@ -117,25 +121,37 @@ class VideoPlayer(QWidget):
         vbox.addWidget(self.subtitleWidget)
         vbox.addWidget(self.statusLabel)
         vbox.addWidget(self.progressSlider)
+        # 控制列（播放、快退、快進、重播、音量）
         hbox = QHBoxLayout()
+        # 按鈕+說明群組
+        btn_group = QHBoxLayout()
         self.replayButton.setToolTip("重播到開頭")
         self.rewindButton.setToolTip("倒退5秒")
         self.playButton.setToolTip("播放/暫停")
         self.forwardButton.setToolTip("快轉5秒")
-        hbox.addWidget(self.replayButton)
-        hbox.addWidget(self.rewindButton)
-        hbox.addWidget(self.playButton)
-        hbox.addWidget(self.forwardButton)
-        self.volumeSlider = QSlider(Qt.Horizontal)
-        self.volumeSlider.setRange(0, 100)
-        self.volumeSlider.setValue(70)
-        self.volumeSlider.setFixedWidth(120)
-        hbox.addWidget(QLabel("音量"))
-        hbox.addWidget(self.volumeSlider)
+        btn_group.addWidget(self.replayButton)
+        btn_group.addWidget(QLabel("重播"))
+        btn_group.addWidget(self.rewindButton)
+        btn_group.addWidget(QLabel("倒退"))
+        btn_group.addWidget(self.playButton)
+        btn_group.addWidget(QLabel("播放/暫停"))
+        btn_group.addWidget(self.forwardButton)
+        btn_group.addWidget(QLabel("快轉"))
+        hbox.addLayout(btn_group)
+        # 音量
+        vol_group = QHBoxLayout()
+        vol_group.addWidget(QLabel("音量"))
+        vol_group.addWidget(self.volumeSlider)
+        hbox.addLayout(vol_group)
         vbox.addLayout(hbox)
+        # 影片選擇與處理
         hbox2 = QHBoxLayout()
+        self.selectButton.setToolTip("選擇要播放的影片檔案")
+        self.processButton.setToolTip("進行語音辨識與字幕生成")
         hbox2.addWidget(self.selectButton)
+        hbox2.addWidget(QLabel("選擇影片"))
         hbox2.addWidget(self.processButton)
+        hbox2.addWidget(QLabel("處理影片"))
         hbox2.addWidget(QLabel("辨識:"))
         hbox2.addWidget(self.langCombo)
         hbox2.addWidget(QLabel("翻譯成:"))
@@ -150,6 +166,7 @@ class VideoPlayer(QWidget):
         self.rewindButton.clicked.connect(lambda: self.seek(-5000))
         self.forwardButton.clicked.connect(lambda: self.seek(5000))
         self.progressSlider.sliderReleased.connect(self.on_seek_slider_released)
+        self.progressSlider.sliderPressed.connect(self.on_seek_slider_pressed)
         self.timer.timeout.connect(self.update_ui)
         self.volumeSlider.valueChanged.connect(self.on_volume_changed)
     def select_video(self):
@@ -234,6 +251,7 @@ class VideoPlayer(QWidget):
             self.media_player.play()
             self.playButton.setText("❚❚")
             self.timer.start()
+            self.update_ui()  # 確保一開始就同步字幕
     def replay(self):
         self.media_player.set_time(0)
         self.media_player.play()
@@ -244,6 +262,10 @@ class VideoPlayer(QWidget):
         pos = max(0, min(pos, self.media_player.get_length()))
         self.media_player.set_time(pos)
         self.timer.start()
+    def on_seek_slider_pressed(self):
+        # 拖曳時暫停timer，避免跳動
+        if self.timer.isActive():
+            self.timer.stop()
     def on_seek_slider_released(self):
         length = self.media_player.get_length()
         if length > 0:
@@ -267,6 +289,7 @@ class VideoPlayer(QWidget):
     def on_vlc_playing(self, event):
         if not self.timer.isActive():
             self.timer.start()
+            self.update_ui()  # 確保一開始就同步字幕
     def on_volume_changed(self, value):
         self.media_player.audio_set_volume(value)
 
