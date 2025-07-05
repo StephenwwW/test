@@ -123,8 +123,8 @@ class VideoPlayer(QWidget):
         vbox.addWidget(self.progressSlider)
         # 控制列（播放、快退、快進、重播、音量）
         hbox = QHBoxLayout()
-        # 按鈕+說明群組
         btn_group = QHBoxLayout()
+        btn_group.setSpacing(15)  # 調整按鈕間距適中
         self.replayButton.setToolTip("重播到開頭")
         self.rewindButton.setToolTip("倒退5秒")
         self.playButton.setToolTip("播放/暫停")
@@ -138,24 +138,35 @@ class VideoPlayer(QWidget):
         btn_group.addWidget(self.forwardButton)
         btn_group.addWidget(QLabel("快轉"))
         hbox.addLayout(btn_group)
-        # 音量
-        vol_group = QHBoxLayout()
-        vol_group.addWidget(QLabel("音量"))
-        vol_group.addWidget(self.volumeSlider)
-        hbox.addLayout(vol_group)
+        # 音量文字移到音量條右側
+        volume_layout = QHBoxLayout()
+        volume_layout.setSpacing(0)
+        volume_layout.setContentsMargins(0, 0, 0, 0)
+        volume_layout.addWidget(self.volumeSlider)
+        volume_label = QLabel("音量")
+        volume_label.setContentsMargins(0, 0, 0, 0)
+        volume_layout.addWidget(volume_label)
+        hbox.addLayout(volume_layout)
         vbox.addLayout(hbox)
-        # 影片選擇與處理
+        # 影片選擇與處理（移除多餘Label）
         hbox2 = QHBoxLayout()
         self.selectButton.setToolTip("選擇要播放的影片檔案")
         self.processButton.setToolTip("進行語音辨識與字幕生成")
         hbox2.addWidget(self.selectButton)
-        hbox2.addWidget(QLabel("選擇影片"))
         hbox2.addWidget(self.processButton)
-        hbox2.addWidget(QLabel("處理影片"))
-        hbox2.addWidget(QLabel("辨識:"))
-        hbox2.addWidget(self.langCombo)
-        hbox2.addWidget(QLabel("翻譯成:"))
-        hbox2.addWidget(self.targetLangCombo)
+        # 新增複製字幕按鈕
+        self.copyButton = QPushButton("複製字幕")
+        self.copyButton.setToolTip("複製當前字幕和翻譯文字到剪貼板")
+        hbox2.addWidget(self.copyButton)
+        # 辨識與翻譯橫向對齊
+        lang_layout = QHBoxLayout()
+        lang_label = QLabel("辨識:")
+        lang_layout.addWidget(lang_label)
+        lang_layout.addWidget(self.langCombo)
+        target_label = QLabel("翻譯成:")
+        lang_layout.addWidget(target_label)
+        lang_layout.addWidget(self.targetLangCombo)
+        hbox2.addLayout(lang_layout)
         vbox.addLayout(hbox2)
         self.setLayout(vbox)
     def connect_signals(self):
@@ -169,6 +180,8 @@ class VideoPlayer(QWidget):
         self.progressSlider.sliderPressed.connect(self.on_seek_slider_pressed)
         self.timer.timeout.connect(self.update_ui)
         self.volumeSlider.valueChanged.connect(self.on_volume_changed)
+        # 連接複製字幕按鈕
+        self.copyButton.clicked.connect(self.copy_subtitles)
     def select_video(self):
         file_path, _ = QFileDialog.getOpenFileName(self, "選擇影片", "", "MP4 files (*.mp4)")
         if file_path:
@@ -251,7 +264,7 @@ class VideoPlayer(QWidget):
             self.media_player.play()
             self.playButton.setText("❚❚")
             self.timer.start()
-            self.update_ui()  # 確保一開始就同步字幕
+            self.update_ui()  # 確保字幕立即更新
     def replay(self):
         self.media_player.set_time(0)
         self.media_player.play()
@@ -271,7 +284,7 @@ class VideoPlayer(QWidget):
         if length > 0:
             pos = int(self.progressSlider.value() / 100 * length)
             self.media_player.set_time(pos)
-            self.update_ui()  # 立即同步字幕
+            self.update_ui()  # 確保字幕立即更新
             self.timer.start()
     def update_ui(self):
         pos = self.media_player.get_time()
@@ -280,6 +293,8 @@ class VideoPlayer(QWidget):
             self.progressSlider.setValue(int(pos / self.media_player.get_length() * 100))
         if not self.media_player.is_playing():
             self.timer.stop()
+        else:
+            self.timer.start()  # 確保計時器持續運行
     def get_video_fps(self):
         try:
             with VideoFileClip(self.video_path) as clip:
@@ -289,9 +304,14 @@ class VideoPlayer(QWidget):
     def on_vlc_playing(self, event):
         if not self.timer.isActive():
             self.timer.start()
-            self.update_ui()  # 確保一開始就同步字幕
+            self.update_ui()  # 確保字幕立即更新
     def on_volume_changed(self, value):
         self.media_player.audio_set_volume(value)
+    def copy_subtitles(self):
+        # 複製當前字幕和翻譯文字到剪貼板
+        current_text = self.subtitleWidget.text()
+        clipboard = QApplication.clipboard()
+        clipboard.setText(current_text)
 
 def save_config(config_data):
     import json
