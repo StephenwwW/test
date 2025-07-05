@@ -118,6 +118,10 @@ class VideoPlayer(QWidget):
         vbox.addWidget(self.statusLabel)
         vbox.addWidget(self.progressSlider)
         hbox = QHBoxLayout()
+        self.replayButton.setToolTip("重播到開頭")
+        self.rewindButton.setToolTip("倒退5秒")
+        self.playButton.setToolTip("播放/暫停")
+        self.forwardButton.setToolTip("快轉5秒")
         hbox.addWidget(self.replayButton)
         hbox.addWidget(self.rewindButton)
         hbox.addWidget(self.playButton)
@@ -145,7 +149,7 @@ class VideoPlayer(QWidget):
         self.replayButton.clicked.connect(self.replay)
         self.rewindButton.clicked.connect(lambda: self.seek(-5000))
         self.forwardButton.clicked.connect(lambda: self.seek(5000))
-        self.progressSlider.sliderReleased.connect(self.slider_seek)
+        self.progressSlider.sliderReleased.connect(self.on_seek_slider_released)
         self.timer.timeout.connect(self.update_ui)
         self.volumeSlider.valueChanged.connect(self.on_volume_changed)
     def select_video(self):
@@ -240,10 +244,12 @@ class VideoPlayer(QWidget):
         pos = max(0, min(pos, self.media_player.get_length()))
         self.media_player.set_time(pos)
         self.timer.start()
-    def slider_seek(self):
-        if self.media_player.get_length() > 0:
-            pos = int(self.progressSlider.value() / 100 * self.media_player.get_length())
+    def on_seek_slider_released(self):
+        length = self.media_player.get_length()
+        if length > 0:
+            pos = int(self.progressSlider.value() / 100 * length)
             self.media_player.set_time(pos)
+            self.update_ui()  # 立即同步字幕
             self.timer.start()
     def update_ui(self):
         pos = self.media_player.get_time()
