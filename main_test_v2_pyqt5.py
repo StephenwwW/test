@@ -1,14 +1,14 @@
 import sys, os, time
-from PyQt5.QtWidgets import (QApplication, QWidget, QVBoxLayout, QHBoxLayout, QPushButton, QLabel, QFileDialog, QSlider, QComboBox)
-from PyQt5.QtMultimedia import QMediaPlayer, QMediaContent
-from PyQt5.QtMultimediaWidgets import QVideoWidget
-from PyQt5.QtCore import Qt, QUrl, QTimer
-from PyQt5.QtGui import QFont, QPainter, QColor
+from PyQt5.QtWidgets import (QApplication, QWidget, QVBoxLayout, QHBoxLayout, QPushButton, QLabel, QFileDialog, QSlider, QComboBox, QMessageBox, QInputDialog)
+from PyQt5.QtCore import Qt, QTimer, QThread, pyqtSignal
+from PyQt5.QtGui import QFont
 import pysrt
 from deep_translator import GoogleTranslator
 from moviepy.editor import VideoFileClip
+import vlc
+import subprocess
 
-CONFIG_FILE = "config.json"
+CONFIG_FILE = r"C:/Users/H/Desktop/video/Noto_Sans_JP/config.json"
 AUDIO_PATH = "temp_audio.wav"
 
 class SubtitleWidget(QLabel):
@@ -19,7 +19,6 @@ class SubtitleWidget(QLabel):
         self.setFont(QFont("Arial", 24))
         self.subs = []
         self.translated = []
-        self.current_text = ""
     def set_subtitles(self, subs, translated):
         self.subs = subs
         self.translated = translated
@@ -33,13 +32,55 @@ class SubtitleWidget(QLabel):
                 break
         self.setText(text)
 
+class VideoProcessThread(QThread):
+    finished = pyqtSignal(list, list, str)
+    error = pyqtSignal(str)
+    def __init__(self, video_path, lang, target_lang, whisper_path, model_path):
+        super().__init__()
+        self.video_path = video_path
+        self.lang = lang
+        self.target_lang = target_lang
+        self.whisper_path = whisper_path
+        self.model_path = model_path
+    def run(self):
+        import pysrt
+        from deep_translator import GoogleTranslator
+        from moviepy.editor import VideoFileClip
+        import subprocess, os
+        try:
+            if os.path.exists(AUDIO_PATH):
+                try: os.remove(AUDIO_PATH)
+                except Exception: pass
+            with VideoFileClip(self.video_path) as video_clip:
+                video_clip.audio.write_audiofile(AUDIO_PATH, logger=None)
+            srt_path = os.path.splitext(self.video_path)[0] + ".srt"
+            command = [
+                self.whisper_path, "-m", self.model_path, "-f", AUDIO_PATH, "-osrt", "-of", os.path.splitext(srt_path)[0],
+                "-l", self.lang, "-t", "8"
+            ]
+            subprocess.run(command, check=True, capture_output=True, text=True, encoding='utf-8', errors='ignore')
+            subs_raw = []
+            if os.path.exists(srt_path):
+                with open(srt_path, 'r', encoding='utf-8') as f:
+                    subs_raw = list(pysrt.from_string(f.read()))
+            translated = []
+            if self.lang != self.target_lang and self.target_lang != 'none':
+                for sub in subs_raw:
+                    translated.append(GoogleTranslator(source=self.lang, target=self.target_lang).translate(sub.text))
+            self.finished.emit(subs_raw, translated, "處理完成！可以播放影片。")
+        except Exception as e:
+            self.error.emit(str(e))
+
 class VideoPlayer(QWidget):
     def __init__(self):
         super().__init__()
-        self.setWindowTitle("字幕學習播放器 (PyQt5)")
-        self.resize(950, 900)
-        self.mediaPlayer = QMediaPlayer(None, QMediaPlayer.VideoSurface)
-        self.videoWidget = QVideoWidget()
+        self.setWindowTitle("字幕學習播放器 (VLC+PyQt5)")
+        self.resize(1200, 900)
+        self.vlc_instance = vlc.Instance()
+        self.media_player = self.vlc_instance.media_player_new()
+        self.videoWidget = QLabel()
+        self.videoWidget.setStyleSheet("background: black;")
+        self.videoWidget.setMinimumHeight(600)
         self.subtitleWidget = SubtitleWidget()
         self.statusLabel = QLabel("請選擇影片檔案")
         self.progressSlider = QSlider(Qt.Horizontal)
@@ -62,6 +103,9 @@ class VideoPlayer(QWidget):
         self.srt_path = None
         self.video_path = None
         self.duration = 0
+        config = load_config()
+        self.whisper_path = config.get("whisper_path", "whisper.cpp.exe")
+        self.model_path = config.get("model_path", "ggml-base.bin")
         self.setup_ui()
         self.connect_signals()
     def setup_ui(self):
@@ -85,7 +129,6 @@ class VideoPlayer(QWidget):
         hbox2.addWidget(self.targetLangCombo)
         vbox.addLayout(hbox2)
         self.setLayout(vbox)
-        self.mediaPlayer.setVideoOutput(self.videoWidget)
     def connect_signals(self):
         self.selectButton.clicked.connect(self.select_video)
         self.processButton.clicked.connect(self.process_video)
@@ -94,98 +137,131 @@ class VideoPlayer(QWidget):
         self.rewindButton.clicked.connect(lambda: self.seek(-5000))
         self.forwardButton.clicked.connect(lambda: self.seek(5000))
         self.progressSlider.sliderReleased.connect(self.slider_seek)
-        self.mediaPlayer.positionChanged.connect(self.on_position_changed)
-        self.mediaPlayer.durationChanged.connect(self.on_duration_changed)
+        self.timer.timeout.connect(self.update_ui)
     def select_video(self):
         file_path, _ = QFileDialog.getOpenFileName(self, "選擇影片", "", "MP4 files (*.mp4)")
         if file_path:
-            self.statusLabel.setText(f"已選擇: {os.path.basename(file_path)}")
-            self.video_path = file_path
-            self.mediaPlayer.stop()
-            self.mediaPlayer.setVideoOutput(self.videoWidget)
-            self.mediaPlayer.setMedia(QMediaContent(QUrl.fromLocalFile(file_path)))
+            abs_path = os.path.abspath(file_path)
+            self.statusLabel.setText(f"已選擇: {os.path.basename(abs_path)}")
+            self.video_path = abs_path
+            self.media_player.stop()
+            self.set_vlc_video_output()
             self.processButton.setEnabled(True)
-            self.srt_path = os.path.splitext(file_path)[0] + "_combined.srt"
+            self.srt_path = os.path.splitext(abs_path)[0] + ".srt"
             self.progressSlider.setValue(0)
             self.subtitleWidget.setText("")
             self.subs = []
             self.translated = []
-            if os.path.exists(AUDIO_PATH):
-                try:
-                    os.remove(AUDIO_PATH)
-                except Exception: pass
+            self.playButton.setEnabled(False)
+            self.replayButton.setEnabled(False)
+            self.rewindButton.setEnabled(False)
+            self.forwardButton.setEnabled(False)
+    def set_vlc_video_output(self):
+        if sys.platform.startswith('win'):
+            self.media_player.set_hwnd(int(self.videoWidget.winId()))
+        elif sys.platform.startswith('linux'):
+            self.media_player.set_xwindow(int(self.videoWidget.winId()))
+        elif sys.platform == 'darwin':
+            self.media_player.set_nsobject(int(self.videoWidget.winId()))
     def process_video(self):
         if not self.video_path: return
-        self.statusLabel.setText("步驟 1/3: 提取音訊...")
+        self.statusLabel.setText("步驟 1/4: 提取音訊...")
         QApplication.processEvents()
-        with VideoFileClip(self.video_path) as video_clip:
-            video_clip.audio.write_audiofile(AUDIO_PATH, logger=None)
-        self.statusLabel.setText("步驟 2/3: 載入字幕...")
+        # 讓用戶手動設定 whisper 路徑與模型
+        config_changed = False
+        if not os.path.exists(self.whisper_path):
+            self.whisper_path, _ = QFileDialog.getOpenFileName(self, "選擇 whisper.cpp 執行檔", "", "執行檔 (*.exe)")
+            config_changed = True
+        if not os.path.exists(self.model_path):
+            self.model_path, _ = QFileDialog.getOpenFileName(self, "選擇 Whisper 模型檔", "", "模型 (*.bin)")
+            config_changed = True
+        if not self.whisper_path or not os.path.exists(self.whisper_path):
+            QMessageBox.critical(self, "Whisper 錯誤", "找不到 whisper.cpp 執行檔，請手動設定！")
+            self.statusLabel.setText("Whisper.cpp 執行失敗")
+            return
+        if not self.model_path or not os.path.exists(self.model_path):
+            QMessageBox.critical(self, "Whisper 錯誤", "找不到 Whisper 模型檔，請手動設定！")
+            self.statusLabel.setText("Whisper.cpp 執行失敗")
+            return
+        if config_changed:
+            save_config({"whisper_path": self.whisper_path, "model_path": self.model_path})
+        lang = self.langCombo.currentText()
+        target_lang = self.targetLangCombo.currentText()
+        self.statusLabel.setText("影片處理中，請稍候...")
         QApplication.processEvents()
-        if os.path.exists(self.srt_path):
-            with open(self.srt_path, 'r', encoding='utf-8') as f:
-                self.subs = list(pysrt.from_string(f.read()))
-            self.translated = []
-            if self.langCombo.currentText() != self.targetLangCombo.currentText() and self.targetLangCombo.currentText() != 'none':
-                for sub in self.subs:
-                    translated = GoogleTranslator(source=self.langCombo.currentText(), target=self.targetLangCombo.currentText()).translate(sub.text)
-                    self.translated.append(translated)
+        self.processThread = VideoProcessThread(self.video_path, lang, target_lang, self.whisper_path, self.model_path)
+        self.processThread.finished.connect(self.on_process_finished)
+        self.processThread.error.connect(self.on_process_error)
+        self.processButton.setEnabled(False)
+        self.processThread.start()
+    def on_process_finished(self, subs, translated, msg):
+        self.subs = subs
+        self.translated = translated
         self.subtitleWidget.set_subtitles(self.subs, self.translated)
-        self.statusLabel.setText("步驟 3/3: 準備播放器...")
-        QApplication.processEvents()
-        self.mediaPlayer.setVideoOutput(self.videoWidget)
-        self.mediaPlayer.setMedia(QMediaContent(QUrl.fromLocalFile(self.video_path)))
-        self.mediaPlayer.play()
-        self.mediaPlayer.pause()
-        self.duration = self.mediaPlayer.duration()
+        self.statusLabel.setText(msg)
+        self.set_vlc_video_output()
+        self.media_player.set_media(self.vlc_instance.media_new(self.video_path))
         self.progressSlider.setValue(0)
         self.playButton.setEnabled(True)
-        self.timer.start()
-        self.statusLabel.setText("處理完成！可以播放影片。")
+        self.replayButton.setEnabled(True)
+        self.rewindButton.setEnabled(True)
+        self.forwardButton.setEnabled(True)
+        self.processButton.setEnabled(True)
+    def on_process_error(self, err):
+        QMessageBox.critical(self, "處理錯誤", f"發生錯誤: {err}")
+        self.statusLabel.setText("處理失敗，請重試。")
+        self.processButton.setEnabled(True)
     def play_pause(self):
-        if self.mediaPlayer.state() == QMediaPlayer.PlayingState:
-            self.mediaPlayer.pause()
+        if self.media_player.is_playing():
+            self.media_player.pause()
             self.playButton.setText("▶")
+            self.timer.stop()
         else:
-            self.mediaPlayer.play()
+            self.media_player.play()
             self.playButton.setText("❚❚")
             self.timer.start()
     def replay(self):
-        self.mediaPlayer.setPosition(0)
-        self.mediaPlayer.play()
+        self.media_player.set_time(0)
+        self.media_player.play()
         self.playButton.setText("❚❚")
         self.timer.start()
     def seek(self, delta_ms):
-        pos = self.mediaPlayer.position() + delta_ms
-        pos = max(0, min(pos, self.mediaPlayer.duration()))
-        self.mediaPlayer.setPosition(pos)
+        pos = self.media_player.get_time() + delta_ms
+        pos = max(0, min(pos, self.media_player.get_length()))
+        self.media_player.set_time(pos)
         self.timer.start()
     def slider_seek(self):
-        if self.duration > 0:
-            pos = int(self.progressSlider.value() / 100 * self.duration)
-            self.mediaPlayer.setPosition(pos)
+        if self.media_player.get_length() > 0:
+            pos = int(self.progressSlider.value() / 100 * self.media_player.get_length())
+            self.media_player.set_time(pos)
             self.timer.start()
-    def on_position_changed(self, pos):
-        if self.duration > 0:
-            self.progressSlider.setValue(int(pos / self.duration * 100))
-    def on_duration_changed(self, duration):
-        self.duration = duration
     def update_ui(self):
-        pos = self.mediaPlayer.position()
+        pos = self.media_player.get_time()
         self.subtitleWidget.update_subtitle(pos)
-        # 動態根據FPS調整timer
-        fps = self.get_video_fps()
-        if fps > 0:
-            self.timer.setInterval(int(1000 / fps))
-        if self.mediaPlayer.state() != QMediaPlayer.PlayingState:
+        if self.media_player.get_length() > 0:
+            self.progressSlider.setValue(int(pos / self.media_player.get_length() * 100))
+        if not self.media_player.is_playing():
             self.timer.stop()
     def get_video_fps(self):
-        # 用 moviepy 取得FPS
         try:
             with VideoFileClip(self.video_path) as clip:
                 return clip.fps
         except Exception:
             return 30
+
+def save_config(config_data):
+    import json
+    with open(CONFIG_FILE, 'w', encoding='utf-8') as f:
+        json.dump(config_data, f, indent=4)
+def load_config():
+    import json
+    if os.path.exists(CONFIG_FILE):
+        with open(CONFIG_FILE, 'r', encoding='utf-8') as f:
+            try:
+                return json.load(f)
+            except json.JSONDecodeError:
+                return {}
+    return {}
 
 if __name__ == "__main__":
     app = QApplication(sys.argv)
