@@ -7,9 +7,12 @@ from deep_translator import GoogleTranslator
 from moviepy.editor import VideoFileClip
 import vlc
 import subprocess
+import shlex
+import traceback
 
-CONFIG_FILE = r"C:/Users/H/Desktop/video/Noto_Sans_JP/config.json"
-AUDIO_PATH = "temp_audio.wav"
+# 使用腳本所在目錄作為基準目錄
+BASE_DIR = os.path.dirname(os.path.abspath(__file__))
+CONFIG_FILE = os.path.join(BASE_DIR, "config.json")
 
 class SubtitleWidget(QLabel):
     def __init__(self, parent=None):
@@ -25,10 +28,11 @@ class SubtitleWidget(QLabel):
     def update_subtitle(self, ms):
         text = ""
         for i, sub in enumerate(self.subs):
-            if sub.start.ordinal <= ms <= sub.end.ordinal:
-                text = sub.text
-                if self.translated and i < len(self.translated):
-                    text += "\n" + self.translated[i]
+            # sub: (orig, trans, en, start, end)
+            start = sub[3] if len(sub) > 3 else 0
+            end = sub[4] if len(sub) > 4 else 0
+            if start <= ms <= end:
+                text = sub[0] if len(sub) > 0 else ''
                 break
         self.setText(text)
 
@@ -46,30 +50,60 @@ class VideoProcessThread(QThread):
         import pysrt
         from deep_translator import GoogleTranslator
         from moviepy.editor import VideoFileClip
-        import subprocess, os
+        import subprocess, os, traceback
         try:
-            if os.path.exists(AUDIO_PATH):
-                try: os.remove(AUDIO_PATH)
+            audio_path = os.path.abspath("temp_audio.wav")
+            if os.path.exists(audio_path):
+                try: os.remove(audio_path)
                 except Exception: pass
             with VideoFileClip(self.video_path) as video_clip:
-                video_clip.audio.write_audiofile(AUDIO_PATH, logger=None)
-            srt_path = os.path.splitext(self.video_path)[0] + ".srt"
-            command = [
-                self.whisper_path, "-m", self.model_path, "-f", AUDIO_PATH, "-osrt", "-of", os.path.splitext(srt_path)[0],
-                "-l", self.lang, "-t", "8"
+                video_clip.audio.write_audiofile(audio_path, logger=None)
+            srt_base = os.path.splitext(self.video_path)[0]
+            srt_path_orig = srt_base + "_orig.srt"
+            # 只產生原文字幕
+            command_transcribe = [
+                os.path.abspath(self.whisper_path),
+                "-m", os.path.abspath(self.model_path),
+                "-f", audio_path,
+                "-osrt",
+                "-of", srt_base + "_orig",
+                "-l", self.lang,
+                "-t", "8"
             ]
-            subprocess.run(command, check=True, capture_output=True, text=True, encoding='utf-8', errors='ignore')
+            result1 = subprocess.run(command_transcribe, capture_output=True, text=True, encoding='utf-8', errors='ignore')
+            if result1.returncode != 0:
+                raise RuntimeError(f"whisper-cli transcribe 失敗\n命令: {command_transcribe}\nstdout: {result1.stdout}\nstderr: {result1.stderr}")
             subs_raw = []
-            if os.path.exists(srt_path):
-                with open(srt_path, 'r', encoding='utf-8') as f:
+            if os.path.exists(srt_path_orig):
+                with open(srt_path_orig, 'r', encoding='utf-8') as f:
                     subs_raw = list(pysrt.from_string(f.read()))
+            else:
+                raise RuntimeError(f"找不到原文字幕檔案: {srt_path_orig}")
+            # Google 翻譯原文
             translated = []
-            if self.lang != self.target_lang and self.target_lang != 'none':
+            if subs_raw and self.lang != self.target_lang and self.target_lang != 'none':
                 for sub in subs_raw:
-                    translated.append(GoogleTranslator(source=self.lang, target=self.target_lang).translate(sub.text))
-            self.finished.emit(subs_raw, translated, "處理完成！可以播放影片。")
+                    try:
+                        translated.append(GoogleTranslator(source=self.lang, target=self.target_lang).translate(sub.text))
+                    except Exception as e:
+                        translated.append("")
+            # 對齊原文與翻譯
+            max_len = max(len(subs_raw), len(translated))
+            combined = []
+            for i in range(max_len):
+                orig = subs_raw[i].text if i < len(subs_raw) else ''
+                trans = translated[i] if i < len(translated) else ''
+                if i < len(subs_raw):
+                    start = subs_raw[i].start.ordinal
+                    end = subs_raw[i].end.ordinal
+                else:
+                    start = 0
+                    end = 0
+                combined.append((orig, trans, '', start, end))
+            self.finished.emit(combined, [], "處理完成！可以播放影片。")
         except Exception as e:
-            self.error.emit(str(e))
+            tb = traceback.format_exc()
+            self.error.emit(f"{str(e)}\n{tb}")
 
 class VideoPlayer(QWidget):
     def __init__(self):
@@ -83,6 +117,7 @@ class VideoPlayer(QWidget):
         self.videoWidget.setMinimumHeight(600)
         self.subtitleWidget = SubtitleWidget()
         self.statusLabel = QLabel("請選擇影片檔案")
+        self.statusLabel.setFont(QFont("Arial", 24))
         self.progressSlider = QSlider(Qt.Horizontal)
         self.progressSlider.setRange(0, 100)
         self.playButton = QPushButton("▶")
@@ -106,8 +141,9 @@ class VideoPlayer(QWidget):
         self.video_path = None
         self.duration = 0
         config = load_config()
-        self.whisper_path = config.get("whisper_path", "whisper.cpp.exe")
-        self.model_path = config.get("model_path", "ggml-base.bin")
+        # 預設直接使用 v3 版本模型
+        self.whisper_path = config.get("whisper_path", "C:/Users/H/Desktop/whisper.cpp_v1/whisper.cpp/whisper-cli.exe")
+        self.model_path = "C:/Users/H/Desktop/whisper.cpp_v1/whisper.cpp/models/ggml-large-v3.bin"
         self.volumeSlider = QSlider(Qt.Horizontal)
         self.volumeSlider.setRange(0, 100)
         self.volumeSlider.setValue(70)
@@ -208,53 +244,71 @@ class VideoPlayer(QWidget):
         elif sys.platform == 'darwin':
             self.media_player.set_nsobject(int(self.videoWidget.winId()))
     def process_video(self):
-        if not self.video_path: return
-        self.statusLabel.setText("步驟 1/4: 提取音訊...")
+        if not self.video_path: 
+            return
+            
+        self.statusLabel.setText("準備處理影片...")
         QApplication.processEvents()
+
         # 讓用戶手動設定 whisper 路徑與模型
         config_changed = False
         if not os.path.exists(self.whisper_path):
             self.whisper_path, _ = QFileDialog.getOpenFileName(self, "選擇 whisper.cpp 執行檔", "", "執行檔 (*.exe)")
             config_changed = True
-        if not os.path.exists(self.model_path):
-            self.model_path, _ = QFileDialog.getOpenFileName(self, "選擇 Whisper 模型檔", "", "模型 (*.bin)")
-            config_changed = True
-        if not self.whisper_path or not os.path.exists(self.whisper_path):
-            QMessageBox.critical(self, "Whisper 錯誤", "找不到 whisper.cpp 執行檔，請手動設定！")
-            self.statusLabel.setText("Whisper.cpp 執行失敗")
-            return
+            
         if not self.model_path or not os.path.exists(self.model_path):
             QMessageBox.critical(self, "Whisper 錯誤", "找不到 Whisper 模型檔，請手動設定！")
             self.statusLabel.setText("Whisper.cpp 執行失敗")
             return
+            
         if config_changed:
             save_config({"whisper_path": self.whisper_path, "model_path": self.model_path})
+
         lang = self.langCombo.currentText()
         target_lang = self.targetLangCombo.currentText()
-        self.statusLabel.setText("影片處理中，請稍候...")
-        QApplication.processEvents()
-        self.processThread = VideoProcessThread(self.video_path, lang, target_lang, self.whisper_path, self.model_path)
+        
+        # 禁用相關按鈕
+        self.processButton.setEnabled(False)
+        self.selectButton.setEnabled(False)
+        self.playButton.setEnabled(False)
+        
+        # 創建並配置處理線程
+        self.processThread = VideoProcessThread(
+            self.video_path, lang, target_lang, 
+            self.whisper_path, self.model_path
+        )
+        
+        # 連接信號
         self.processThread.finished.connect(self.on_process_finished)
         self.processThread.error.connect(self.on_process_error)
-        self.processButton.setEnabled(False)
+        
+        # 開始處理
         self.processThread.start()
+        
+    def on_process_error(self, err):
+        QMessageBox.critical(self, "處理錯誤", f"發生錯誤: {err}")
+        self.statusLabel.setText("處理失敗，請重試。")
+        self.processButton.setEnabled(True)
+        self.selectButton.setEnabled(True)
+        
     def on_process_finished(self, subs, translated, msg):
         self.subs = subs
         self.translated = translated
         self.subtitleWidget.set_subtitles(self.subs, self.translated)
         self.statusLabel.setText(msg)
-        self.set_vlc_video_output()
-        self.media_player.set_media(self.vlc_instance.media_new(self.video_path))
-        self.progressSlider.setValue(0)
+        
+        # 重新啟用所有按鈕
+        self.processButton.setEnabled(True)
+        self.selectButton.setEnabled(True)
         self.playButton.setEnabled(True)
         self.replayButton.setEnabled(True)
         self.rewindButton.setEnabled(True)
         self.forwardButton.setEnabled(True)
-        self.processButton.setEnabled(True)
-    def on_process_error(self, err):
-        QMessageBox.critical(self, "處理錯誤", f"發生錯誤: {err}")
-        self.statusLabel.setText("處理失敗，請重試。")
-        self.processButton.setEnabled(True)
+        
+        # 設置視頻播放
+        self.set_vlc_video_output()
+        self.media_player.set_media(self.vlc_instance.media_new(self.video_path))
+        self.progressSlider.setValue(0)
     def play_pause(self):
         if self.media_player.is_playing():
             self.media_player.pause()
@@ -289,6 +343,19 @@ class VideoPlayer(QWidget):
     def update_ui(self):
         pos = self.media_player.get_time()
         self.subtitleWidget.update_subtitle(pos)
+        # 狀態欄只顯示原文+翻譯兩行
+        gui_text = ""
+        for i, sub in enumerate(self.subs):
+            start = sub[3] if len(sub) > 3 else 0
+            end = sub[4] if len(sub) > 4 else 0
+            if start <= pos <= end:
+                orig = sub[0] if len(sub) > 0 else ''
+                trans = sub[1] if len(sub) > 1 else ''
+                gui_text = orig
+                if trans:
+                    gui_text += "\n" + trans
+                break
+        self.statusLabel.setText(gui_text if gui_text else "")
         if self.media_player.get_length() > 0:
             self.progressSlider.setValue(int(pos / self.media_player.get_length() * 100))
         if not self.media_player.is_playing():
